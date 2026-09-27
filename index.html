@@ -77,6 +77,18 @@
   .view img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: auto; }
   .view.pixelated img { image-rendering: pixelated; width: 100%; height: 100%; }
   .busy, .err { color: var(--muted); font-size: 13px; }
+  .limitbox { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+  .limitbox input { width: 110px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit; }
+  .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; }
+  .badge.ok { background: color-mix(in srgb, #1a9e55 16%, transparent); color: #1a9e55; }
+  .badge.over { background: color-mix(in srgb, #d33 16%, transparent); color: #d33; }
+  .est { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); margin: -2px 0 10px; }
+  .est button { font-size: 12px; padding: 3px 10px; border-radius: 99px; }
+  .est button.cur { border-color: var(--accent); background: var(--soft); font-weight: 600; }
+  .est button.over { color: #d33; }
+  .fitnote { font-size: 12px; color: var(--muted); margin: -4px 0 10px; }
+  .fitnote:empty { display: none; }
   .err { color: #d33; }
 </style>
 </head>
@@ -127,6 +139,10 @@
     </div>
 
     <div class="row">
+      <label class="field"><span>용량 제한 (선택)</span>
+        <span class="limitbox"><input id="limit" type="number" min="1" step="1" inputmode="numeric" placeholder="예: 150"> KB 이하</span>
+        <small>올릴 사이트의 최대 용량을 적으면, 넘는 파일은 설정을 자동으로 단순하게 바꿔서 맞춰요.</small>
+      </label>
       <label class="check"><input type="checkbox" id="compress" checked>
         <span><b>파일 크기 줄이기</b><br><small style="color:var(--muted)">보이는 모양은 그대로 두고 SVG 코드만 정리해요 (SVGO).</small></span>
       </label>
@@ -143,9 +159,10 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const items = []; // { name, file, img, svg, el }
+const items = []; // { name, file, img, svg, bytes, sizes, fit, el }
 const MAX_SIDE = 4000; // 이보다 큰 이미지는 줄여서 변환 (너무 느려지지 않게)
 const TINY = 64, TINY_TARGET = 512; // 64px 미만 이미지는 512px로 픽셀 그대로 확대 후 변환
+const MODE_NAMES = { vector: '벡터', pixel: '픽셀', embed: '원본 넣기' };
 
 // 이미지 종류별 추천값 (슬라이더 1~5)
 const KINDS = {
@@ -160,6 +177,15 @@ const SPECKLE    = [1, 2, 4, 8, 16];      // 이 크기(px)보다 작은 조각�
 
 const mode = () => document.querySelector('input[name=mode]:checked').value;
 
+// 용량은 맥 Finder와 같은 방식(1KB = 1000바이트)으로 표시 → 사이트 기준보다 약간 엄격해서 안전
+function fmtSize(bytes) {
+  return bytes >= 1e6 ? (bytes / 1e6).toFixed(1) + ' MB' : (bytes / 1e3).toFixed(1) + ' KB';
+}
+function limitBytes() {
+  const v = parseFloat($('limit').value);
+  return v > 0 ? v * 1000 : 0;
+}
+
 function applyKind() {
   const k = KINDS[$('kind').value];
   $('simplifyColor').value = k.color;
@@ -167,18 +193,21 @@ function applyKind() {
   $('colorField').style.display = $('kind').value === 'bw' ? 'none' : '';
 }
 
-function vtracerOptions() {
+// fit: 용량 맞추기용 덮어쓰기 값 { color, speckle, scale }
+function vtracerOptions(m, fit) {
   const kind = $('kind').value;
+  const color = fit ? fit.color : +$('simplifyColor').value;
+  const speckle = fit ? fit.speckle : +$('speckle').value;
   const o = {
-    mode: mode() === 'pixel' ? 'pixel' : 'spline',
-    filterSpeckle: SPECKLE[$('speckle').value - 1],
-    layerDifference: LAYER_DIFF[$('simplifyColor').value - 1],
+    mode: m === 'pixel' ? 'pixel' : 'spline',
+    filterSpeckle: SPECKLE[speckle - 1],
+    layerDifference: LAYER_DIFF[color - 1],
     colorPrecision: 8,          // 색을 세밀하게 구분 (기본값 6이면 바구니 줄무늬처럼 비슷한 색 무늬가 사라짐)
     optimize: 2,
   };
   // VTracer의 'photo' 프리셋은 모양이 뭉개져서 쓰지 않음 (테스트로 확인) → 사진은 위 슬라이더 값만 더 촘촘하게
   if (kind === 'bw') o.preset = 'bw';
-  if (mode() === 'pixel') { o.filterSpeckle = 0; o.layerDifference = 0; delete o.preset; }
+  if (m === 'pixel') { o.filterSpeckle = 0; o.layerDifference = 0; delete o.preset; }
   return o;
 }
 
@@ -191,19 +220,19 @@ function loadImage(file) {
   });
 }
 
-function getPixels(img) {
+function getPixels(img, m, scaleMul = 1) {
   const W = img.naturalWidth, H = img.naturalHeight;
   const long = Math.max(W, H);
   // 벡터 모드에서 아주 작은 이미지(픽셀아트·작은 아이콘)는 픽셀 그대로 키워서 변환해야 모양이 뭉개지지 않음.
   // 그 외에는 원본 크기 그대로가 가장 깔끔함 (부드럽게 키우면 경계에 띠가 생김 — 테스트로 확인)
-  const scale = mode() === 'vector' && long < TINY ? TINY_TARGET / long : Math.min(1, MAX_SIDE / long);
+  const scale = (m === 'vector' && long < TINY ? TINY_TARGET / long : Math.min(1, MAX_SIDE / long)) * scaleMul;
   const w = Math.max(1, Math.round(W * scale)), h = Math.max(1, Math.round(H * scale));
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   const ctx = c.getContext('2d');
   if (scale > 1) ctx.imageSmoothingEnabled = false;
   else ctx.imageSmoothingQuality = 'high';
-  if ($('kind').value === 'bw' && mode() === 'vector') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
+  if ($('kind').value === 'bw' && m === 'vector') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
   ctx.drawImage(img, 0, 0, w, h);
   return ctx.getImageData(0, 0, w, h);
 }
@@ -281,45 +310,174 @@ function runInWorker(msg, transfer) {
   });
 }
 
-async function makeSVG(item) {
+function embedSVG(W, H, url) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+         `<image width="${W}" height="${H}" href="${url}"/></svg>`;
+}
+
+function hasAlpha(img) {
+  const px = getPixels(img, 'embed', Math.min(1, 256 / Math.max(img.naturalWidth, img.naturalHeight)));
+  for (let i = 3; i < px.data.length; i += 4) if (px.data[i] < 255) return true;
+  return false;
+}
+
+// 원본 넣기: fit이 있으면 이미지를 줄이거나 JPEG로 다시 저장해서 용량을 맞춤
+async function makeEmbed(item, fit) {
   const W = item.img.naturalWidth, H = item.img.naturalHeight;
-  if (mode() === 'embed') {
-    const url = await fileToDataURL(item.file);
-    return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
-                  `<image width="${W}" height="${H}" href="${url}"/></svg>`, note: '' };
-  }
-  const px = getPixels(item.img);
+  if (!fit) return { svg: embedSVG(W, H, await fileToDataURL(item.file)), note: '' };
+  const w = Math.max(1, Math.round(W * fit.scale)), h = Math.max(1, Math.round(H * fit.scale));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(item.img, 0, 0, w, h);
+  return { svg: embedSVG(W, H, c.toDataURL(fit.type, fit.quality)), note: '' };
+}
+
+async function makeSVG(item, m = mode(), fit = null) {
+  if (m === 'embed') return makeEmbed(item, fit);
+  const W = item.img.naturalWidth, H = item.img.naturalHeight;
+  const px = getPixels(item.img, m, fit ? fit.scale : 1);
   return runInWorker({
     rgba: px.data.buffer, w: px.width, h: px.height, W, H,
-    options: vtracerOptions(), compress: $('compress').checked,
+    options: vtracerOptions(m, fit), compress: $('compress').checked,
   }, [px.data.buffer]);
 }
 
-async function convert(item) {
+// 용량 제한에 맞는 설정 찾기: 원본에 가까운 것부터 차례로 시도해서 처음으로 제한 안에 들어오는 것 사용
+function fitCandidates(m, item) {
+  if (m === 'vector') {
+    const c0 = +$('simplifyColor').value, s0 = +$('speckle').value;
+    const steps = [[2, 3], [3, 3], [3, 4], [4, 4], [4, 5], [5, 5]]
+      .filter(([c, s]) => c >= c0 && s >= s0 && !(c === c0 && s === s0))
+      .map(([color, speckle]) => ({ color, speckle, scale: 1 }));
+    // 그래도 크면 이미지 해상도를 낮춰서 변환 (선이 약간 단순해짐)
+    for (const scale of [0.75, 0.5, 0.35]) steps.push({ color: 5, speckle: 5, scale });
+    return steps;
+  }
+  if (m === 'embed') {
+    const alpha = hasAlpha(item.img);
+    const out = [];
+    for (const scale of [1, 0.85, 0.7, 0.5, 0.35, 0.25]) {
+      if (alpha) out.push({ scale, type: 'image/png' }); // 투명 배경은 PNG 유지
+      else for (const quality of [0.9, 0.75, 0.6]) out.push({ scale, type: 'image/jpeg', quality });
+    }
+    return out.filter(f => !(f.scale === 1 && f.type === 'image/png'));
+  }
+  return []; // 픽셀 모드는 줄일 방법이 없음
+}
+
+function describeFit(m, fit) {
+  const parts = [];
+  if (m === 'vector') {
+    parts.push(`색 단순화 ${fit.color}`, `잡티 지우기 ${fit.speckle}`);
+    if (fit.scale < 1) parts.push(`해상도 ${Math.round(fit.scale * 100)}%`);
+  } else {
+    if (fit.scale < 1) parts.push(`크기 ${Math.round(fit.scale * 100)}%`);
+    if (fit.type === 'image/jpeg') parts.push(`JPEG 화질 ${Math.round(fit.quality * 100)}%`);
+  }
+  return parts.join(' · ');
+}
+
+function showResult(item, svg) {
+  item.svg = svg;
+  item.bytes = new Blob([svg]).size;
+  const view = item.el.querySelector('.svgview');
+  const out = new Image();
+  out.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  view.innerHTML = '';
+  view.appendChild(out);
+}
+
+function updateBadge(item) {
+  const badge = item.el.querySelector('.badge');
+  const lim = limitBytes();
+  if (!item.svg) { badge.textContent = ''; badge.className = 'badge'; return; }
+  badge.textContent = fmtSize(item.bytes) + (lim ? (item.bytes <= lim ? ' ✓ 제한 이하' : ' ✗ 제한 초과') : '');
+  badge.className = 'badge ' + (!lim ? '' : item.bytes <= lim ? 'ok' : 'over');
+}
+
+// 방식별 예상 크기 줄 (현재 설정 기준으로 실제 변환해 본 값)
+function renderEstimates(item) {
+  const box = item.el.querySelector('.est');
+  const lim = limitBytes();
+  box.innerHTML = '<span>방식별 크기 (누르면 그 방식으로 바뀜):</span>';
+  for (const m of ['vector', 'pixel', 'embed']) {
+    const b = document.createElement('button');
+    const v = item.sizes[m];
+    b.textContent = `${MODE_NAMES[m]} ${v == null ? '계산 중…' : v === 'err' ? '실패' : fmtSize(v)}` +
+      (lim && typeof v === 'number' ? (v <= lim ? ' ✓' : m === mode() || m === 'pixel' ? ' ✗' : ' ✗ (고르면 맞춰 봄)') : '');
+    if (m === mode()) b.classList.add('cur');
+    if (lim && typeof v === 'number' && v > lim) b.classList.add('over');
+    b.title = '이 방식으로 바꾸기';
+    b.onclick = () => { document.querySelector(`input[name=mode][value=${m}]`).checked = true; onModeChange(); };
+    box.appendChild(b);
+  }
+}
+
+async function estimateOthers(item, my) {
+  for (const m of ['vector', 'pixel', 'embed']) {
+    if (item.sizes[m] != null) continue;
+    if (my !== generation) return;
+    try {
+      const { svg } = await makeSVG(item, m);
+      item.sizes[m] = new Blob([svg]).size;
+    } catch (e) {
+      if (e.message === 'CANCELLED') return;
+      item.sizes[m] = 'err';
+    }
+    renderEstimates(item);
+  }
+}
+
+async function convert(item, my = generation) {
   const view = item.el.querySelector('.svgview');
   const info = item.el.querySelector('.info');
+  const note = item.el.querySelector('.fitnote');
   const btn = item.el.querySelector('.dl');
+  const m = mode();
   const t = performance.now();
   view.innerHTML = '<span class="busy">변환 중…</span>';
+  note.textContent = '';
+  item.svg = ''; updateBadge(item);
+  item.sizes = { vector: null, pixel: null, embed: null };
+  renderEstimates(item);
+  let status = '변환 중…';
+  const setStatus = text => { status = text; const busy = view.querySelector('.busy'); if (busy) busy.textContent = text; };
   const tick = setInterval(() => {
     const sec = Math.round((performance.now() - t) / 1000);
-    if (sec >= 2) view.querySelector('.busy').textContent = `변환 중… ${sec}초 (큰 이미지는 오래 걸릴 수 있어요)`;
+    const busy = view.querySelector('.busy');
+    if (busy && sec >= 2) busy.textContent = `${status} ${sec}초 (큰 이미지는 오래 걸릴 수 있어요)`;
   }, 1000);
   btn.disabled = true;
   try {
-    const { svg, note } = await makeSVG(item);
-    item.svg = svg;
-    const out = new Image();
-    out.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
-    view.innerHTML = '';
-    view.appendChild(out);
-    const bytes = new Blob([svg]).size;
-    const size = bytes > 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : (bytes / 1024).toFixed(1) + ' KB';
-    let text = `${item.img.naturalWidth}×${item.img.naturalHeight} · SVG ${size} · ${Math.round(performance.now() - t)}ms`;
-    if (note) text += ` · ${note}`;
-    if (mode() === 'pixel' && bytes > 1024 * 1024) text += " · 파일이 커요. 사진 같은 이미지는 '원본 그대로 넣기'를 추천해요";
+    let { svg, note: n } = await makeSVG(item, m);
+    item.sizes[m] = new Blob([svg]).size;
+    let fitMsg = '';
+    const lim = limitBytes();
+    if (lim && item.sizes[m] > lim) {
+      // 제한 초과 → 설정을 단계적으로 단순하게 바꿔 가며 재시도
+      const cands = fitCandidates(m, item);
+      if (!cands.length) fitMsg = `제한(${fmtSize(lim)})을 넘어요. 픽셀 모드는 줄일 수 없어서 '벡터'나 '원본 넣기'를 추천해요.`;
+      for (let i = 0; i < cands.length; i++) {
+        if (my !== generation) return;
+        setStatus(`${fmtSize(lim)}에 맞추는 중… (${i + 1}/${cands.length})`);
+        const r = await makeSVG(item, m, cands[i]);
+        const bytes = new Blob([r.svg]).size;
+        if (bytes <= lim) { svg = r.svg; n = r.note; fitMsg = `원래 ${fmtSize(item.sizes[m])} → 제한에 맞추려고 자동 조정: ${describeFit(m, cands[i])}`; break; }
+        if (i === cands.length - 1) fitMsg = `가장 단순하게 해도 ${fmtSize(bytes)}라서 제한(${fmtSize(lim)})을 못 맞췄어요. 다른 방식을 써 보세요.`;
+      }
+    }
+    showResult(item, svg);
+    item.sizes[m] = item.bytes; // 자동 조정했으면 조정된 크기로 표시
+    updateBadge(item);
+    note.textContent = fitMsg;
+    let text = `${item.img.naturalWidth}×${item.img.naturalHeight} · ${Math.round(performance.now() - t)}ms`;
+    if (n) text += ` · ${n}`;
     info.textContent = text;
     btn.disabled = false;
+    renderEstimates(item);
+    estimateOthers(item, my); // 나머지 방식 크기는 뒤에서 계산
   } catch (e) {
     if (e.message === 'CANCELLED') return; // 새 설정으로 다시 변환됨
     console.error(e);
@@ -348,20 +506,22 @@ async function addFiles(files) {
     el.className = 'item';
     el.innerHTML = `
       <header>
-        <span class="name"></span><span class="info"></span>
+        <span class="name"></span><span class="badge"></span><span class="info"></span>
         <span style="flex:1"></span>
         <button class="rm">삭제</button>
         <button class="dl primary" disabled>SVG 다운로드</button>
       </header>
+      <div class="est"></div>
+      <div class="fitnote"></div>
       <div class="pair">
-        <div class="box"><div class="cap">원본</div><div class="view orig"></div></div>
+        <div class="box"><div class="cap">원본 (${fmtSize(file.size)})</div><div class="view orig"></div></div>
         <div class="box"><div class="cap">SVG 결과</div><div class="view svgview"></div></div>
       </div>`;
     el.querySelector('.name').textContent = name;
     el.querySelector('.orig').appendChild(img);
     // 아주 작은 이미지는 흐리지 않게 픽셀 그대로 확대해서 보여줌
     if (Math.max(img.naturalWidth, img.naturalHeight) < 100) el.querySelectorAll('.view').forEach(v => v.classList.add('pixelated'));
-    const item = { name, file, img, svg: '', el };
+    const item = { name, file, img, svg: '', bytes: 0, sizes: {}, el };
     el.querySelector('.dl').onclick = () => download(item);
     el.querySelector('.rm').onclick = () => { items.splice(items.indexOf(item), 1); el.remove(); refreshButtons(); };
     items.push(item);
@@ -381,8 +541,13 @@ async function reconvertAll() {
   cancelAll();
   for (const it of items) {
     if (my !== generation) return; // 그새 설정이 또 바뀌면 이번 차례는 중단
-    await convert(it);
+    await convert(it, my);
   }
+}
+
+function onModeChange() {
+  $('vectorOnly').classList.toggle('off', mode() !== 'vector');
+  reconvertAll();
 }
 
 // 이벤트
@@ -398,16 +563,23 @@ document.addEventListener('paste', e => {
   if (files.length) addFiles(files);
 });
 
-document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = () => {
-  $('vectorOnly').classList.toggle('off', mode() !== 'vector');
-  reconvertAll();
-});
+document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = onModeChange);
 $('kind').onchange = () => { applyKind(); reconvertAll(); };
 $('simplifyColor').onchange = reconvertAll;
 $('speckle').onchange = reconvertAll;
 $('compress').onchange = reconvertAll;
 $('reconvert').onclick = reconvertAll;
 $('all').onclick = () => items.forEach((it, i) => setTimeout(() => download(it), i * 300));
+
+// 용량 제한은 다음에 열어도 기억 (이 기기·브라우저에만 저장)
+try { $('limit').value = localStorage.getItem('sizeLimitKB') || ''; } catch (e) {}
+let limitTimer;
+$('limit').oninput = () => {
+  try { localStorage.setItem('sizeLimitKB', $('limit').value); } catch (e) {}
+  items.forEach(it => { updateBadge(it); renderEstimates(it); });
+  clearTimeout(limitTimer);
+  limitTimer = setTimeout(reconvertAll, 800); // 입력을 멈추면 제한에 맞춰 다시 변환
+};
 
 applyKind();
 </script>
