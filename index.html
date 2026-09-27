@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PNG → SVG 변환기</title>
+<script src="vtracer.js"></script>
+<script src="svgo.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1d2129; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #3b6ef5; --accent-text: #fff;
+    --checker: #e9ecef; --soft: #eef2fe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171b; --panel: #1f2227; --text: #e8eaed; --muted: #9aa0a6;
+      --line: #33373d; --accent: #6b8ffa; --accent-text: #0d0f12;
+      --checker: #2a2d33; --soft: #242a3a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+
+  #drop { border: 2px dashed var(--line); border-radius: 12px; background: var(--panel);
+    padding: 36px 16px; text-align: center; cursor: pointer; transition: .15s; }
+  #drop.over { border-color: var(--accent); background: var(--soft); }
+  #drop strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  #drop span { color: var(--muted); font-size: 13px; }
+
+  .settings { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; margin: 16px 0; }
+  .settings h2 { font-size: 14px; margin: 0 0 8px; }
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  @media (max-width: 720px) { .modes { grid-template-columns: 1fr; } }
+  .mode { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; display: block; }
+  .mode:has(input:checked) { border-color: var(--accent); background: var(--soft); }
+  .mode input { margin: 0 6px 0 0; accent-color: var(--accent); }
+  .mode b { font-size: 14px; }
+  .mode small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px 24px; margin-top: 16px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field > span:first-child { font-size: 13px; font-weight: 600; }
+  .field small { color: var(--muted); font-size: 12px; }
+  .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+  select { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit; }
+  input[type=range] { accent-color: var(--accent); width: 100%; }
+  .check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
+  .check input { margin-top: 3px; accent-color: var(--accent); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  #vectorOnly.off { display: none; }
+
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .item { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px; margin-bottom: 14px; }
+  .item header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .item .name { font-weight: 600; word-break: break-all; }
+  .item .info { color: var(--muted); font-size: 13px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .pair { grid-template-columns: 1fr; } }
+  .box { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .box .cap { font-size: 12px; color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  .view { height: 300px; display: flex; align-items: center; justify-content: center; padding: 8px;
+    background-color: var(--panel);
+    background-image: conic-gradient(var(--checker) 25%, transparent 0 50%, var(--checker) 0 75%, transparent 0);
+    background-size: 16px 16px; }
+  .view img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: auto; }
+  .view.pixelated img { image-rendering: pixelated; width: 100%; height: 100%; }
+  .busy, .err { color: var(--muted); font-size: 13px; }
+  .err { color: #d33; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PNG → SVG 변환기</h1>
+  <p class="sub">이미지를 끌어다 놓으면 SVG로 바꿔 줘요. 모든 처리는 내 컴퓨터 안에서만 이루어집니다. (변환 엔진: VTracer)</p>
+
+  <div id="drop">
+    <strong>여기에 PNG / JPG 파일을 끌어다 놓기</strong>
+    <span>또는 클릭해서 선택 · Ctrl/⌘+V로 붙여넣기 · 여러 장 가능</span>
+    <input id="file" type="file" accept="image/*" multiple hidden>
+  </div>
+
+  <section class="settings">
+    <h2>어떻게 바꿀까요?</h2>
+    <div class="modes">
+      <label class="mode"><input type="radio" name="mode" value="vector" checked><b>벡터로 다시 그리기</b> (추천)
+        <small>도형으로 다시 그려요. 크게 키워도 안 깨지고 편집도 돼요. 원본과 약간 다를 수 있어요.</small></label>
+      <label class="mode"><input type="radio" name="mode" value="pixel"><b>픽셀 그대로</b>
+        <small>픽셀 하나하나를 네모로 바꿔요. 원본과 똑같아요. 픽셀아트·작은 아이콘용 (큰 사진은 파일이 커짐)</small></label>
+      <label class="mode"><input type="radio" name="mode" value="embed"><b>원본 그대로 넣기</b>
+        <small>PNG를 SVG 파일 안에 그대로 담아요. 100% 똑같지만 벡터가 아니라서 키우면 깨져요.</small></label>
+    </div>
+
+    <div id="vectorOnly">
+      <div class="row">
+        <label class="field"><span>이미지 종류</span>
+          <select id="kind">
+            <option value="logo">로고 / 아이콘</option>
+            <option value="illust" selected>일러스트 / 그림</option>
+            <option value="photo">사진</option>
+            <option value="bw">흑백 (서명·선 그림·스캔 문서)</option>
+          </select>
+          <small>고르면 아래 두 값이 그 종류에 맞게 자동으로 맞춰져요.</small>
+        </label>
+        <label class="field" id="colorField"><span>색 단순화</span>
+          <input id="simplifyColor" type="range" min="1" max="5" step="1">
+          <div class="scale"><span>원본 색 최대한 유지</span><span>비슷한 색은 합치기</span></div>
+          <small>결과가 얼룩덜룩하면 오른쪽으로, 색이 뭉개지면 왼쪽으로.</small>
+        </label>
+        <label class="field"><span>잡티 지우기</span>
+          <input id="speckle" type="range" min="1" max="5" step="1">
+          <div class="scale"><span>작은 점도 살리기</span><span>작은 점은 지우기</span></div>
+          <small>자글자글한 점이 많으면 오른쪽으로, 작은 글자·점이 사라지면 왼쪽으로.</small>
+        </label>
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="check"><input type="checkbox" id="compress" checked>
+        <span><b>파일 크기 줄이기</b><br><small style="color:var(--muted)">보이는 모양은 그대로 두고 SVG 코드만 정리해요 (SVGO).</small></span>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button id="reconvert" disabled>다시 변환</button>
+      <button id="all" class="primary" disabled>전체 다운로드</button>
+    </div>
+  </section>
+
+  <div id="list"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const items = []; // { name, file, img, svg, el }
+const MAX_SIDE = 4000; // 이보다 큰 이미지는 줄여서 변환 (너무 느려지지 않게)
+const TINY = 64, TINY_TARGET = 512; // 64px 미만 이미지는 512px로 픽셀 그대로 확대 후 변환
+
+// 이미지 종류별 추천값 (슬라이더 1~5)
+const KINDS = {
+  logo:   { color: 3, speckle: 3 },
+  illust: { color: 2, speckle: 3 },
+  photo:  { color: 1, speckle: 2 },
+  bw:     { color: 3, speckle: 3 },
+};
+// 슬라이더 1~5 → VTracer 값
+const LAYER_DIFF = [4, 6, 10, 16, 28];    // 색 차이가 이 값보다 작으면 같은 색으로 합침
+const SPECKLE    = [1, 2, 4, 8, 16];      // 이 크기(px)보다 작은 조각은 지움
+
+const mode = () => document.querySelector('input[name=mode]:checked').value;
+
+function applyKind() {
+  const k = KINDS[$('kind').value];
+  $('simplifyColor').value = k.color;
+  $('speckle').value = k.speckle;
+  $('colorField').style.display = $('kind').value === 'bw' ? 'none' : '';
+}
+
+function vtracerOptions() {
+  const kind = $('kind').value;
+  const o = {
+    mode: mode() === 'pixel' ? 'pixel' : 'spline',
+    filterSpeckle: SPECKLE[$('speckle').value - 1],
+    layerDifference: LAYER_DIFF[$('simplifyColor').value - 1],
+    colorPrecision: 8,          // 색을 세밀하게 구분 (기본값 6이면 바구니 줄무늬처럼 비슷한 색 무늬가 사라짐)
+    optimize: 2,
+  };
+  // VTracer의 'photo' 프리셋은 모양이 뭉개져서 쓰지 않음 (테스트로 확인) → 사진은 위 슬라이더 값만 더 촘촘하게
+  if (kind === 'bw') o.preset = 'bw';
+  if (mode() === 'pixel') { o.filterSpeckle = 0; o.layerDifference = 0; delete o.preset; }
+  return o;
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('이미지를 읽을 수 없어요'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function getPixels(img) {
+  const W = img.naturalWidth, H = img.naturalHeight;
+  const long = Math.max(W, H);
+  // 벡터 모드에서 아주 작은 이미지(픽셀아트·작은 아이콘)는 픽셀 그대로 키워서 변환해야 모양이 뭉개지지 않음.
+  // 그 외에는 원본 크기 그대로가 가장 깔끔함 (부드럽게 키우면 경계에 띠가 생김 — 테스트로 확인)
+  const scale = mode() === 'vector' && long < TINY ? TINY_TARGET / long : Math.min(1, MAX_SIDE / long);
+  const w = Math.max(1, Math.round(W * scale)), h = Math.max(1, Math.round(H * scale));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  if (scale > 1) ctx.imageSmoothingEnabled = false;
+  else ctx.imageSmoothingQuality = 'high';
+  if ($('kind').value === 'bw' && mode() === 'vector') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
+  ctx.drawImage(img, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h);
+}
+
+function fileToDataURL(file) {
+  return new Promise(resolve => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.readAsDataURL(file);
+  });
+}
+
+// ── 백그라운드 변환 (Worker) ─────────────────────────────
+// 변환·압축을 화면과 다른 스레드에서 돌려서, 큰 이미지도 화면이 멈추지 않게 함
+function workerMain() {
+  const VT = __vtracerFactory();
+  const SV = __svgoFactory();
+  onmessage = async e => {
+    const m = e.data;
+    try {
+      await VT.ready;
+      let svg = VT.vectorize_rgba(new Uint8Array(m.rgba), m.w, m.h, m.options);
+      // 크기 조절이 되도록 viewBox 추가 (원본 크기로 표시)
+      svg = svg.replace(/<svg([^>]*?) width="\d+" height="\d+"/, `<svg$1 width="${m.W}" height="${m.H}" viewBox="0 0 ${m.w} ${m.h}"`);
+      let note = '';
+      if (m.compress) {
+        // 아주 큰 SVG는 압축이 수십 초 걸리는데 줄어드는 양은 몇 %뿐이라 건너뜀 (테스트: 1.4MB → 4초, 6% 감소)
+        if (svg.length > 1.5e6) note = '너무 커서 압축 생략';
+        else {
+          try { svg = SV.optimize(svg, { multipass: svg.length < 3e5 }).data; }
+          catch (err) { note = '압축 실패, 압축 없이 저장'; }
+        }
+      }
+      postMessage({ id: m.id, svg, note });
+    } catch (err) {
+      postMessage({ id: m.id, error: String((err && err.message) || err) });
+    }
+  };
+}
+
+let worker = null;
+const jobs = new Map();
+let nextJob = 1;
+
+function getWorker() {
+  if (!worker) {
+    const src = __vtracerFactory.toString() + '\n' + __svgoFactory.toString() + '\n(' + workerMain.toString() + ')();';
+    worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    worker.onmessage = e => {
+      const job = jobs.get(e.data.id);
+      if (!job) return;
+      jobs.delete(e.data.id);
+      e.data.error ? job.reject(new Error(e.data.error)) : job.resolve(e.data);
+    };
+    worker.onerror = e => {
+      for (const job of jobs.values()) job.reject(new Error(e.message || '변환 중 오류'));
+      jobs.clear(); worker = null;
+    };
+  }
+  return worker;
+}
+
+// 설정을 바꾸면 진행 중인 변환을 버리고 새로 시작
+function cancelAll() {
+  if (worker) { worker.terminate(); worker = null; }
+  for (const job of jobs.values()) job.reject(new Error('CANCELLED'));
+  jobs.clear();
+}
+
+function runInWorker(msg, transfer) {
+  return new Promise((resolve, reject) => {
+    const id = nextJob++;
+    jobs.set(id, { resolve, reject });
+    getWorker().postMessage({ ...msg, id }, transfer);
+  });
+}
+
+async function makeSVG(item) {
+  const W = item.img.naturalWidth, H = item.img.naturalHeight;
+  if (mode() === 'embed') {
+    const url = await fileToDataURL(item.file);
+    return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+                  `<image width="${W}" height="${H}" href="${url}"/></svg>`, note: '' };
+  }
+  const px = getPixels(item.img);
+  return runInWorker({
+    rgba: px.data.buffer, w: px.width, h: px.height, W, H,
+    options: vtracerOptions(), compress: $('compress').checked,
+  }, [px.data.buffer]);
+}
+
+async function convert(item) {
+  const view = item.el.querySelector('.svgview');
+  const info = item.el.querySelector('.info');
+  const btn = item.el.querySelector('.dl');
+  const t = performance.now();
+  view.innerHTML = '<span class="busy">변환 중…</span>';
+  const tick = setInterval(() => {
+    const sec = Math.round((performance.now() - t) / 1000);
+    if (sec >= 2) view.querySelector('.busy').textContent = `변환 중… ${sec}초 (큰 이미지는 오래 걸릴 수 있어요)`;
+  }, 1000);
+  btn.disabled = true;
+  try {
+    const { svg, note } = await makeSVG(item);
+    item.svg = svg;
+    const out = new Image();
+    out.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    view.innerHTML = '';
+    view.appendChild(out);
+    const bytes = new Blob([svg]).size;
+    const size = bytes > 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : (bytes / 1024).toFixed(1) + ' KB';
+    let text = `${item.img.naturalWidth}×${item.img.naturalHeight} · SVG ${size} · ${Math.round(performance.now() - t)}ms`;
+    if (note) text += ` · ${note}`;
+    if (mode() === 'pixel' && bytes > 1024 * 1024) text += " · 파일이 커요. 사진 같은 이미지는 '원본 그대로 넣기'를 추천해요";
+    info.textContent = text;
+    btn.disabled = false;
+  } catch (e) {
+    if (e.message === 'CANCELLED') return; // 새 설정으로 다시 변환됨
+    console.error(e);
+    view.innerHTML = `<span class="err">변환 실패: ${String(e.message || e)}</span>`;
+  } finally {
+    clearInterval(tick);
+  }
+}
+
+function download(item) {
+  const blob = new Blob([item.svg], { type: 'image/svg+xml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = item.name.replace(/\.[^.]+$/, '') + '.svg';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue;
+    let img;
+    try { img = await loadImage(file); } catch (e) { alert(`${file.name}: ${e.message}`); continue; }
+    const name = file.name || 'pasted.png';
+    const el = document.createElement('div');
+    el.className = 'item';
+    el.innerHTML = `
+      <header>
+        <span class="name"></span><span class="info"></span>
+        <span style="flex:1"></span>
+        <button class="rm">삭제</button>
+        <button class="dl primary" disabled>SVG 다운로드</button>
+      </header>
+      <div class="pair">
+        <div class="box"><div class="cap">원본</div><div class="view orig"></div></div>
+        <div class="box"><div class="cap">SVG 결과</div><div class="view svgview"></div></div>
+      </div>`;
+    el.querySelector('.name').textContent = name;
+    el.querySelector('.orig').appendChild(img);
+    // 아주 작은 이미지는 흐리지 않게 픽셀 그대로 확대해서 보여줌
+    if (Math.max(img.naturalWidth, img.naturalHeight) < 100) el.querySelectorAll('.view').forEach(v => v.classList.add('pixelated'));
+    const item = { name, file, img, svg: '', el };
+    el.querySelector('.dl').onclick = () => download(item);
+    el.querySelector('.rm').onclick = () => { items.splice(items.indexOf(item), 1); el.remove(); refreshButtons(); };
+    items.push(item);
+    $('list').prepend(el);
+    refreshButtons();
+    await convert(item);
+  }
+}
+
+function refreshButtons() {
+  $('all').disabled = $('reconvert').disabled = items.length === 0;
+}
+
+let generation = 0;
+async function reconvertAll() {
+  const my = ++generation;
+  cancelAll();
+  for (const it of items) {
+    if (my !== generation) return; // 그새 설정이 또 바뀌면 이번 차례는 중단
+    await convert(it);
+  }
+}
+
+// 이벤트
+const drop = $('drop');
+drop.onclick = () => $('file').click();
+$('file').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, () => drop.classList.remove('over')));
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); addFiles([...e.dataTransfer.files]); });
+document.addEventListener('paste', e => {
+  const files = [...e.clipboardData.items].filter(i => i.kind === 'file').map(i => i.getAsFile());
+  if (files.length) addFiles(files);
+});
+
+document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = () => {
+  $('vectorOnly').classList.toggle('off', mode() !== 'vector');
+  reconvertAll();
+});
+$('kind').onchange = () => { applyKind(); reconvertAll(); };
+$('simplifyColor').onchange = reconvertAll;
+$('speckle').onchange = reconvertAll;
+$('compress').onchange = reconvertAll;
+$('reconvert').onclick = reconvertAll;
+$('all').onclick = () => items.forEach((it, i) => setTimeout(() => download(it), i * 300));
+
+applyKind();
+</script>
+</body>
+</html>
